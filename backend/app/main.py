@@ -4,12 +4,25 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import os
 import re
-from typing import Annotated, Callable
+from threading import BoundedSemaphore
+from typing import Annotated, Callable, Any
 from uuid import UUID, uuid4
 
 import jwt
 import psycopg
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from pwdlib import PasswordHash
@@ -17,6 +30,18 @@ from psycopg import errors
 from psycopg.types.json import Jsonb
 
 from app.migrations import apply_migrations
+from app.crypto import IngestionCryptoError, ensure_crypto_ready, public_key_document
+from app.ingestion import (
+    UploadContractError,
+    content_sha256,
+    create_ingestion_job,
+    get_ingestion_job,
+    get_job_line_errors,
+    parse_jsonl,
+    process_ingestion_job,
+    sanitize_filename,
+)
+from app.ingestion_schemas import IngestionJobResponse, UploadResponse
 from app.repositories import (
     create_user,
     get_user_by_id,
@@ -103,6 +128,26 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="SecureLogPath API", version="0.2.0", lifespan=lifespan)
 api = APIRouter(prefix="/api/v1")
+
+
+def configured_limit(name: str, default: int, hard_maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return min(max(value, 1), hard_maximum)
+
+
+INGESTION_SLOTS = BoundedSemaphore(
+    configured_limit("MAX_CONCURRENT_INGESTIONS", 2, 8)
+)
+
+
+def process_job_and_release_slot(*args: Any) -> None:
+    try:
+        process_ingestion_job(*args)
+    finally:
+        INGESTION_SLOTS.release()
 
 
 def audit_denial(action: str, reason_code: str, actor_id: UUID | None = None) -> None:
@@ -273,6 +318,146 @@ def add_user(
     except errors.UniqueViolation:
         raise HTTPException(status_code=409, detail="Username already exists") from None
     return UserResponse(**created)
+
+
+@api.get("/crypto/public-key")
+def get_ingestion_public_key(
+    response: Response,
+    _: Annotated[UserResponse, Depends(require_roles("forwarder"))],
+) -> dict[str, str]:
+    try:
+        key = public_key_document()
+    except IngestionCryptoError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ingestion encryption key is unavailable",
+        ) from None
+    response.headers["Cache-Control"] = "no-store"
+    return key
+
+
+@api.post(
+    "/ingestion/uploads",
+    response_model=UploadResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_ingestion_upload(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    idempotency_key: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
+    forwarder: UserResponse = Depends(require_roles("forwarder")),
+) -> UploadResponse:
+    maximum_bytes = configured_limit("MAX_UPLOAD_BYTES", 2_097_152, 8_388_608)
+    maximum_lines = configured_limit("MAX_UPLOAD_LINES", 5_000, 20_000)
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > maximum_bytes + 65_536:
+        raise HTTPException(status_code=413, detail="upload_too_large")
+    if not file.filename or not file.filename.lower().endswith(".jsonl"):
+        raise HTTPException(status_code=415, detail="unsupported_file_type")
+    media_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if media_type and media_type not in {
+        "application/json",
+        "application/jsonl",
+        "application/x-ndjson",
+        "application/octet-stream",
+    }:
+        raise HTTPException(status_code=415, detail="unsupported_media_type")
+    if idempotency_key is not None and not re.fullmatch(
+        r"[A-Za-z0-9._:-]{1,128}", idempotency_key
+    ):
+        raise HTTPException(status_code=400, detail="invalid_idempotency_key")
+    try:
+        ensure_crypto_ready()
+    except IngestionCryptoError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ingestion encryption key is unavailable",
+        ) from None
+
+    content = await file.read(maximum_bytes + 1)
+    if len(content) > maximum_bytes:
+        raise HTTPException(status_code=413, detail="upload_too_large")
+    try:
+        records, line_errors, total_lines = parse_jsonl(content, maximum_lines)
+    except UploadContractError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from None
+
+    if not INGESTION_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="ingestion_capacity_reached")
+
+    job_id = uuid4()
+    try:
+        with database_connection() as connection:
+            job, created = create_ingestion_job(
+                connection,
+                job_id=job_id,
+                owner_id=forwarder.id,
+                filename=sanitize_filename(file.filename),
+                digest=content_sha256(content),
+                idempotency_key=idempotency_key,
+                total_lines=total_lines,
+                initial_errors=line_errors,
+            )
+    except UploadContractError as exc:
+        INGESTION_SLOTS.release()
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from None
+    except Exception:
+        INGESTION_SLOTS.release()
+        raise
+    if created:
+        background_tasks.add_task(
+            process_job_and_release_slot,
+            job["id"],
+            records,
+            line_errors,
+            forwarder.id,
+            database_connection,
+        )
+    else:
+        INGESTION_SLOTS.release()
+    return UploadResponse(
+        job_id=job["id"],
+        status=job["status"],
+        total_lines=job["total_lines"],
+        accepted_lines=job["accepted_lines"],
+        rejected_lines=job["rejected_lines"],
+        submitted_at=job["submitted_at"],
+        replayed_idempotent_request=not created,
+    )
+
+
+@api.get("/ingestion/jobs/{job_id}", response_model=IngestionJobResponse)
+def read_ingestion_job(
+    job_id: UUID,
+    user: Annotated[
+        UserResponse,
+        Depends(require_roles("forwarder", "analyst", "admin")),
+    ],
+) -> IngestionJobResponse:
+    with database_connection() as connection:
+        job = get_ingestion_job(connection, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Ingestion job not found")
+        if job["submitted_by"] != user.id and user.role not in {"analyst", "admin"}:
+            audit_denial("ingestion.job_read", "job_not_owned", user.id)
+            raise HTTPException(status_code=404, detail="Ingestion job not found")
+        line_errors = get_job_line_errors(connection, job_id)
+    return IngestionJobResponse(
+        job_id=job["id"],
+        status=job["status"],
+        source_filename=job["source_filename"],
+        submitted_at=job["submitted_at"],
+        started_at=job["started_at"],
+        finished_at=job["finished_at"],
+        total_lines=job["total_lines"],
+        accepted_lines=job["accepted_lines"],
+        rejected_lines=job["rejected_lines"],
+        safe_error_code=job["safe_error_code"],
+        line_errors=line_errors,
+    )
 
 
 app.include_router(api)

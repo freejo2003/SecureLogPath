@@ -11,8 +11,10 @@ simulated graph.
 Phase 1 established the repository and clean Compose foundation. Phase 2
 implements the canonical pure-Python algorithm package. Phase 3 adds versioned
 database migrations, the initial data model and topology, API authentication,
-role checks, and audit records. Secure uploads, processing, investigation
-views, and dashboard journeys remain for later phases. The project follows
+role checks, and audit records. Phase 4 adds encrypted JSONL ingestion,
+validation, bounded background processing, KMP signature detection, and alert
+persistence. Investigation views and dashboard journeys remain for later
+phases. The project follows
 `docs/PRODUCT_SCOPE.md` and the supplied SecureLogPath PRD.
 
 ## Technology and layout
@@ -37,9 +39,19 @@ See [the algorithms guide](algorithms/README.md).
 Prerequisites: Docker Engine or Docker Desktop with the Compose plugin.
 
 1. Copy `.env.example` to `.env`.
-2. Replace `POSTGRES_PASSWORD` with a long, unique local secret. Replace the
-   reserved JWT and Admin placeholders before those features are implemented.
-3. Start the stack:
+2. Replace the database, JWT, and bootstrap Admin placeholders with unique
+   local secrets.
+3. Generate the local ingestion key once:
+
+   ```sh
+   docker compose run --rm keygen
+   ```
+
+   The private key is written under the ignored `secrets/` directory and is
+   mounted read-only into the backend. The key generator leaves an existing
+   key untouched.
+
+4. Start the stack:
 
    ```sh
    docker compose up --build
@@ -48,7 +60,8 @@ Prerequisites: Docker Engine or Docker Desktop with the Compose plugin.
 4. Open `http://localhost:8080`. The initial page displays API readiness.
 
 The API readiness endpoint is available at `http://localhost:8080/api/health/ready`.
-It reports ready only when the backend can reach the database.
+It reports ready only when the backend can reach the database. Interactive API
+documentation is at `http://localhost:8080/docs`.
 
 To stop the services while preserving database data, run `docker compose down`.
 To delete the database volume as well, run `docker compose down --volumes`.
@@ -69,8 +82,12 @@ in `schema_migrations`. Back up the database volume before deploying a new
 version. Login tokens expire after 30 minutes. The API exposes interactive
 documentation at `http://localhost:8080/docs`; use it to call
 `POST /api/v1/auth/login`, `GET /api/v1/auth/me`, and (as Admin)
-`POST /api/v1/admin/users`. See the Phase 3 notes in
-`docs/PRODUCT_SCOPE.md` for manual role and database checks.
+`POST /api/v1/admin/users`. Create a Forwarder account, then run
+`docker compose exec backend python -m app.demo_forwarder` for a synthetic
+end-to-end encrypted upload. It prompts for the Forwarder credentials without
+echoing the password and reports only job status and safe line error codes.
+See the Phase 3 and Phase 4 notes in `docs/PRODUCT_SCOPE.md` for the API
+contract and manual checks.
 
 ## Scope and delivery
 

@@ -108,6 +108,50 @@ stream, and dashboard workflows belong to later phases.
 - Backend basics and schema behavior are manually verified through the local
   Compose environment before this phase is called complete.
 
+## Phase 4 scope: secure ingestion pipeline
+
+Forwarders request the active RSA public key, then submit bounded JSONL uploads
+whose sensitive bundle is encrypted with a fresh AES-256-GCM key per event.
+That data key is wrapped with RSA-OAEP using SHA-256. The backend authenticates
+the envelope metadata as AES-GCM associated data before parsing the plaintext
+bundle. Only synthetic data belongs in local demos.
+
+The JSONL contract has one envelope per UTF-8 line: `schema_version`, `log_id`,
+timezone-aware `timestamp`, optional safe asset identifiers, and a `crypto`
+object with `algorithm`, `key_id`, `wrapped_data_key`, `nonce`, and
+`ciphertext`. Associated data is the compact, sorted-key UTF-8 JSON encoding of
+the supplied public envelope metadata (`schema_version`, `log_id`, `timestamp`,
+and whichever asset identifiers are present). The decrypted JSON object may
+contain `event_type`, `source_ip`, `destination_ip`, and `payload`. Ciphertext
+is retained for the sensitive bundle; IP addresses and payload are not copied
+to searchable metadata or ordinary application logs.
+
+Uploads are size/line bounded, checked for duplicate JSON keys and log IDs,
+validated independently per line, and submitted as persistent ingestion jobs.
+The single API process uses bounded FastAPI background tasks; it does not claim
+durable queue semantics. Configured KMP signatures are matched against the
+case-folded payload, and alerts are persisted with signature IDs, categories,
+severity, offsets, and rule version. Invalid lines receive safe error codes.
+Idempotency keys replay the existing job only when the upload digest matches.
+
+### Phase 4 exit criteria
+
+- The runtime-mounted private key is created locally and is excluded from Git
+  and Docker build context. Its public half is available only to Forwarders.
+- Ingestion accepts only bounded `.jsonl` multipart uploads and validates
+  envelope shape, UTC-offset timestamps, identifiers, Base64 framing, key ID,
+  AEAD authentication, and decrypted bundle schema.
+- Sensitive content is decrypted only in process memory, encrypted bytes are
+  retained, and plaintext IP addresses and payloads are never persisted in
+  searchable columns, audit metadata, or logs.
+- Valid records and signature-based alerts persist transactionally. KMP comes
+  from the root `algorithms/` package; signature patterns are database-backed.
+- Jobs, counts, and safe per-line error codes persist and are owner/role checked.
+  Upload size, line count, concurrent processing, and idempotency are bounded.
+- A synthetic Forwarder helper exercises public-key retrieval, encryption,
+  upload, and job status without printing credentials or event plaintext.
+- Phase 4 behavior is manually verified through the local Compose stack.
+
 ## Delivery phases
 
 1. Foundation and scope.
@@ -144,3 +188,19 @@ For local manual verification, open `http://localhost:8080/docs`, sign in at
 token must receive 403 from the Admin user-provisioning route. Inspect
 `schema_migrations`, `app_users`, `audit_events`, `topology_nodes`, and
 `topology_edges` in the database to confirm bootstrap and migration state.
+
+## Phase 4 API and local verification
+
+Apply the additive `002_secure_ingestion.sql` migration on startup. Generate a
+local runtime key with `docker compose run --rm keygen` before starting the
+backend. The API exposes Forwarder-only `GET /api/v1/crypto/public-key` and
+`POST /api/v1/ingestion/uploads`, plus owner/Analyst/Admin job status at
+`GET /api/v1/ingestion/jobs/{job_id}`. A Forwarder can be created by the Admin
+route from Phase 3. Run
+`docker compose exec backend python -m app.demo_forwarder` to send one
+synthetic encrypted event and inspect the resulting job status. A successful
+demo event should be accepted, with a matching SQL-injection signature alert
+persisted in the `alerts` table. Check `ingestion_jobs`,
+`ingestion_job_line_errors`, `security_logs`, `security_log_id_registry`, and
+`alerts` in PostgreSQL. Never put a private key, plaintext event, password, or
+bearer token in a repository file or pasted log.

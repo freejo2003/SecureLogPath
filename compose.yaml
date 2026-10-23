@@ -32,6 +32,13 @@ services:
       JWT_SIGNING_SECRET: ${JWT_SIGNING_SECRET:?Set JWT_SIGNING_SECRET in .env}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      INGESTION_KEY_ID: ${INGESTION_KEY_ID:-siem-key-2026-01}
+      INGESTION_PRIVATE_KEY_PATH: /run/secrets/ingestion_private_key.pem
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2097152}
+      MAX_UPLOAD_LINES: ${MAX_UPLOAD_LINES:-5000}
+      MAX_CONCURRENT_INGESTIONS: ${MAX_CONCURRENT_INGESTIONS:-2}
+    volumes:
+      - ./secrets:/run/secrets:ro
     depends_on:
       database:
         condition: service_healthy
@@ -42,6 +49,15 @@ services:
       retries: 6
       start_period: 10s
     restart: unless-stopped
+
+  keygen:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "app.keygen"]
+    volumes:
+      - ./secrets:/run/secrets
 
   frontend:
     build:
