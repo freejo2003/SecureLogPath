@@ -9,9 +9,11 @@ simulated graph.
 ## Project status
 
 Phase 1 established the repository and clean Compose foundation. Phase 2
-implements the canonical pure-Python algorithm package. Authentication,
-ingestion, persistence schemas, and dashboard journeys remain for later phases.
-The project follows `docs/PRODUCT_SCOPE.md` and the supplied SecureLogPath PRD.
+implements the canonical pure-Python algorithm package. Phase 3 adds versioned
+database migrations, the initial data model and topology, API authentication,
+role checks, and audit records. Secure uploads, processing, investigation
+views, and dashboard journeys remain for later phases. The project follows
+`docs/PRODUCT_SCOPE.md` and the supplied SecureLogPath PRD.
 
 ## Technology and layout
 
@@ -53,10 +55,22 @@ To delete the database volume as well, run `docker compose down --volumes`.
 
 ## Configuration and secrets
 
-`.env.example` documents local settings. The real `.env` file, cryptographic
-private keys, and generated datasets must not be committed. Use different
-secrets for each environment. The frontend build must never receive private
-keys, database credentials, or JWT signing secrets.
+`.env.example` documents local settings. Replace every placeholder before
+starting the stack. Use a unique random `JWT_SIGNING_SECRET` of at least 32
+characters, a bootstrap Admin username, and a unique bootstrap password of at
+least 12 characters. The initial Admin is inserted once; changing the bootstrap
+password later does not reset an existing account. The real `.env` file,
+cryptographic private keys, and generated datasets must not be committed. Use
+different secrets for each environment. The frontend build must never receive
+private keys, database credentials, or JWT signing secrets.
+
+The backend applies versioned SQL migrations during startup and records them
+in `schema_migrations`. Back up the database volume before deploying a new
+version. Login tokens expire after 30 minutes. The API exposes interactive
+documentation at `http://localhost:8080/docs`; use it to call
+`POST /api/v1/auth/login`, `GET /api/v1/auth/me`, and (as Admin)
+`POST /api/v1/admin/users`. See the Phase 3 notes in
+`docs/PRODUCT_SCOPE.md` for manual role and database checks.
 
 ## Scope and delivery
 

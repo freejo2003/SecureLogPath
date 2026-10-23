@@ -28,7 +28,7 @@ function App() {
         <span>{apiStatus}</span>
       </section>
       <p className="notice">
-        Phase 1 foundation. Use synthetic scenarios only; this is not a
+        Phase 3 backend foundation. Use synthetic scenarios only; this is not a
         production SIEM.
       </p>
     </main>

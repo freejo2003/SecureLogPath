@@ -1,4 +1,4 @@
-# SecureLogPath product scope and Phase 1 foundation
+# SecureLogPath product scope and delivery plan
 
 ## Purpose
 
@@ -79,6 +79,35 @@ operations and must not maintain duplicate algorithm implementations.
   security/interpretation limits.
 - The backend image imports the root package directly; no backend copy exists.
 
+## Phase 3 scope: database and backend basics
+
+Phase 3 establishes the persistent data model and authenticated API foundation.
+The secure upload/decryption pipeline, analyst investigation APIs, live event
+stream, and dashboard workflows belong to later phases.
+
+### Phase 3 exit criteria
+
+- Ordered SQL migrations are applied once and tracked in `schema_migrations`;
+  a fresh database receives the core schema and a baseline topology.
+- The schema includes users, ingestion jobs, time-partitioned security logs,
+  alerts, append-only-by-application audit events, topology nodes, and edges.
+- Sensitive log material has only an encrypted storage column; ordinary
+  metadata columns do not contain plaintext payloads or IP addresses.
+- Login uses Argon2 password hashes and short-lived signed bearer tokens. The
+  API loads current user roles from the database and checks roles on protected
+  routes.
+- A one-time environment bootstrap can create the initial Admin without a
+  built-in password. An Admin can provision Forwarder, Analyst, and Admin
+  accounts. Passwords and tokens are never returned by user APIs.
+- Login denials and role denials create safe audit records without credentials
+  or request payloads.
+- On startup, unfinished in-process jobs are marked `interrupted`, matching
+  the documented single-process BackgroundTasks limit.
+- Database, JWT, and bootstrap credentials come from environment configuration;
+  the frontend bundle receives none of them.
+- Backend basics and schema behavior are manually verified through the local
+  Compose environment before this phase is called complete.
+
 ## Delivery phases
 
 1. Foundation and scope.
@@ -92,3 +121,26 @@ operations and must not maintain duplicate algorithm implementations.
 
 Each phase must meet its own written exit criteria before it is called complete.
 Integration feedback may still require revisiting earlier work.
+
+## Phase 3 API and database notes
+
+The backend applies forward-only SQL migrations during startup and records
+their filenames in `schema_migrations`. Back up the database volume before
+deploying a new version. The initial API routes are `POST /api/v1/auth/login`,
+`GET /api/v1/auth/me`, and Admin-only `POST /api/v1/admin/users`. API schema
+documentation is served at `/docs` while the backend is reachable.
+
+`JWT_SIGNING_SECRET` must be a unique random value at least 32 characters long.
+Set a unique `BOOTSTRAP_ADMIN_USERNAME` and
+`BOOTSTRAP_ADMIN_PASSWORD` (at least 12 characters) before first startup. The
+bootstrap only inserts the account when that username does not already exist;
+it never resets an existing password. After the first startup, rotate or remove
+the bootstrap password from the runtime environment. The API returns 503 for
+login until a valid JWT signing secret is configured.
+
+For local manual verification, open `http://localhost:8080/docs`, sign in at
+`POST /api/v1/auth/login`, then use the returned short-lived bearer token for
+`GET /api/v1/auth/me` and `POST /api/v1/admin/users`. A Forwarder or Analyst
+token must receive 403 from the Admin user-provisioning route. Inspect
+`schema_migrations`, `app_users`, `audit_events`, `topology_nodes`, and
+`topology_edges` in the database to confirm bootstrap and migration state.
