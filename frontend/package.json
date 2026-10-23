@@ -1,0 +1,16 @@
+{
+  "name": "securelogpath-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.1.2",
+    "vite": "8.3.4",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {}
+}
