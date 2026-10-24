@@ -35,34 +35,6 @@ function App() {
       .catch(() => setHealth("offline"));
   }, []);
 
-  React.useEffect(() => {
-    let cancelled = false;
-    let savedToken = "";
-    try {
-      savedToken = window.sessionStorage.getItem("securelogpath.access_token") || "";
-    } catch {
-      return undefined;
-    }
-    if (!savedToken) return undefined;
-
-    apiRequest("/auth/me", savedToken)
-      .then((profile) => {
-        if (cancelled) return;
-        setToken(savedToken);
-        setUser(profile);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        if (error.status === 401 || error.status === 403) {
-          try { window.sessionStorage.removeItem("securelogpath.access_token"); } catch { /* Storage may be unavailable. */ }
-        } else {
-          setNotice({ kind: "error", text: "Your session could not be checked. Check service status and refresh." });
-        }
-      });
-
-    return () => { cancelled = true; };
-  }, []);
-
   async function signIn(username, password) {
     setBusy(true);
     setNotice(null);
@@ -72,7 +44,6 @@ function App() {
         body: JSON.stringify({ username, password }),
       });
       const profile = await apiRequest("/auth/me", session.access_token);
-      try { window.sessionStorage.setItem("securelogpath.access_token", session.access_token); } catch { /* Keep this session in memory if storage is unavailable. */ }
       setToken(session.access_token);
       setUser(profile);
     } catch (error) {
@@ -83,7 +54,6 @@ function App() {
   }
 
   function signOut() {
-    try { window.sessionStorage.removeItem("securelogpath.access_token"); } catch { /* Storage may be unavailable. */ }
     setToken("");
     setUser(null);
     setNotice({ kind: "info", text: "You have signed out." });
@@ -135,7 +105,7 @@ function SignIn({ health, busy, notice, onSignIn }) {
             <label>Password<input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
             <button className="button primary full" disabled={busy || health === "offline"}>{busy ? "Signing in…" : "Sign in"}<span aria-hidden="true">→</span></button>
           </form>
-          <p className="privacy-note">Your session stays in this tab across refreshes. It clears when you sign out, close the tab, or the 30-minute token expires.</p>
+          <p className="privacy-note">Your session token stays in this browser tab and is cleared when you sign out or refresh.</p>
         </div>
       </section>
     </main>
