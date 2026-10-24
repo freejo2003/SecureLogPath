@@ -84,14 +84,15 @@ docker compose -f compose.yaml -f compose.public.yaml --profile public up --buil
 
 ## Render deployment
 
-The repository includes a Render Blueprint at `render.yaml`. It deploys the
-frontend publicly, keeps the API private, and restricts the managed PostgreSQL
-database to Render's private network. The frontend service uses the Free plan;
-the private API uses Render's paid `0.5c-512mb` plan; the database currently
-uses the Free plan for a short-lived preview. Render Free Postgres is limited
-to 1 GB, has no backups, and expires after 30 days. For ongoing use, change the
-database to a paid plan in the Blueprint before deployment and check the
-current estimate shown by Render. Free web services can sleep after inactivity.
+The repository includes a Render Blueprint at `render.yaml`. The frontend,
+API, and database use Render's Free plans. The API has a public URL, and the
+frontend proxies API requests to it over HTTPS. Protected operations still
+require bearer authentication and role checks, but the API is no longer
+network-private. Requests sent directly to the API can bypass the frontend's
+Nginx login rate limit, so use this all-free setup as a preview, not for
+sensitive production logs. Free web services can sleep after 15 minutes
+without traffic, and free Postgres is limited to 1 GB, has no backups, and
+expires after 30 days.
 
 To deploy:
 
@@ -99,14 +100,14 @@ To deploy:
 2. Connect `freejo2003/SecureLogPath` and select `render.yaml`.
 3. Set `BOOTSTRAP_ADMIN_PASSWORD` when Render prompts for the Blueprint secret.
    Use a unique password of at least 12 characters.
-4. Before creating the services, change `securelogpath-db` to a paid database
-   plan if this deployment must keep data past the 30-day preview period. Review
-   Render's displayed monthly estimate; no paid resources should be created
-   until you approve that amount.
+4. Confirm that all three resources show the **Free** plan before creating the
+   Blueprint. If Render asks for payment details, check its billing screen for
+   any charge or upgrade before continuing.
 5. Create the Blueprint resources, then add the **private** RSA key file as a
    secret file named `ingestion_private_key.pem` on `securelogpath-api`. Generate
-   a fresh key locally using `python -m app.keygen`; never commit or paste the
-   private key into GitHub or this Blueprint.
+   a fresh key locally with a trusted RSA-2048 key generator; for local Docker,
+   `docker compose run --rm keygen` creates `secrets/ingestion_private_key.pem`.
+   Never commit or paste the private key into GitHub or this Blueprint.
 6. Redeploy the API after adding the secret file. Check `/health/ready`, open
    `/docs`, sign in as Admin, and run the encrypted demo-forwarder workflow.
 
