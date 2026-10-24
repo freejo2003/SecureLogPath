@@ -16,7 +16,9 @@ export async function apiRequest(path, token, options = {}) {
     const detail = typeof body === "object" && body?.detail
       ? body.detail
       : `Request failed (${response.status})`;
-    throw new Error(String(detail));
+    const error = new Error(String(detail));
+    error.status = response.status;
+    throw error;
   }
   return body;
 }
