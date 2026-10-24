@@ -13,9 +13,14 @@ implements the canonical pure-Python algorithm package. Phase 3 adds versioned
 database migrations, the initial data model and topology, API authentication,
 role checks, and audit records. Phase 4 adds encrypted JSONL ingestion,
 validation, bounded background processing, KMP signature detection, and alert
-persistence. Investigation views and dashboard journeys remain for later
-phases. The project follows
-`docs/PRODUCT_SCOPE.md` and the supplied SecureLogPath PRD.
+persistence. Phase 5 adds analyst log/alert search, topology and shortest-path
+analysis, simulated edge containment, reproducible benchmarks, and resumable
+SSE alerts. Phase 6 adds role-based dashboard journeys for sign-in, encrypted
+uploads, investigation, analytics, and account provisioning. The project follows
+`docs/PRODUCT_SCOPE.md` and the supplied SecureLogPath PRD. Phase 7 reviews the
+security boundaries, hardens browser/proxy defaults, and documents operator
+limitations; it does not establish production readiness. Phase 8 adds an
+optional self-hosted Caddy profile for a public HTTPS demo.
 
 ## Technology and layout
 
@@ -63,6 +68,20 @@ The API readiness endpoint is available at `http://localhost:8080/api/health/rea
 It reports ready only when the backend can reach the database. Interactive API
 documentation is at `http://localhost:8080/docs`.
 
+## Public self-hosted demo
+
+The optional `compose.public.yaml` overlay adds Caddy for HTTPS on a
+self-managed Linux host. Set `PUBLIC_DOMAIN` in `.env`, point DNS to the host,
+open ports 80 and 443, and follow the full secret, key backup, update, and
+recovery steps in [Phase 8](docs/PRODUCT_SCOPE.md#phase-8-scope-public-demo-deployment-and-operations).
+The application and proxy are open source; the host and public domain are
+external services. This profile is not a free managed Render/Vercel deployment.
+
+```sh
+docker compose -f compose.yaml -f compose.public.yaml --profile public config -q
+docker compose -f compose.yaml -f compose.public.yaml --profile public up --build -d
+```
+
 To stop the services while preserving database data, run `docker compose down`.
 To delete the database volume as well, run `docker compose down --volumes`.
 
@@ -86,7 +105,7 @@ documentation at `http://localhost:8080/docs`; use it to call
 `docker compose exec backend python -m app.demo_forwarder` for a synthetic
 end-to-end encrypted upload. It prompts for the Forwarder credentials without
 echoing the password and reports only job status and safe line error codes.
-See the Phase 3 and Phase 4 notes in `docs/PRODUCT_SCOPE.md` for the API
+See the Phase 3 through Phase 6 notes in `docs/PRODUCT_SCOPE.md` for the API
 contract and manual checks.
 
 ## Scope and delivery

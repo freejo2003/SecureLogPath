@@ -1,0 +1,10 @@
+{
+	admin off
+}
+
+{$PUBLIC_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy frontend:80 {
+		header_up X-SLP-Client-IP {http.request.remote.host}
+	}
+}

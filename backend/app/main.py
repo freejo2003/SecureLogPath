@@ -1,10 +1,13 @@
 """Backend foundation: database migrations, bootstrap auth, and role checks."""
 
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 import os
 import re
 from threading import BoundedSemaphore
+import time
 from typing import Annotated, Callable, Any
 from uuid import UUID, uuid4
 
@@ -18,16 +21,18 @@ from fastapi import (
     File,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
     status,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from pwdlib import PasswordHash
 from psycopg import errors
-from psycopg.types.json import Jsonb
+from starlette.responses import StreamingResponse
 
 from app.migrations import apply_migrations
 from app.crypto import IngestionCryptoError, ensure_crypto_ready, public_key_document
@@ -42,6 +47,33 @@ from app.ingestion import (
     sanitize_filename,
 )
 from app.ingestion_schemas import IngestionJobResponse, UploadResponse
+from app.investigation import (
+    CursorError,
+    alert_stream_batch,
+    analyze_path,
+    decode_cursor,
+    encode_cursor,
+    get_benchmark_history,
+    get_topology,
+    run_benchmark,
+    search_alerts,
+    search_logs,
+    set_edge_containment,
+)
+from app.investigation_schemas import (
+    AlertItem,
+    AlertSearchResponse,
+    BenchmarkHistoryResponse,
+    BenchmarkRequest,
+    BenchmarkResponse,
+    ContainmentRequest,
+    ContainmentResponse,
+    LogSearchItem,
+    LogSearchResponse,
+    PathRequest,
+    PathResponse,
+    TopologyResponse,
+)
 from app.repositories import (
     create_user,
     get_user_by_id,
@@ -240,7 +272,9 @@ def readiness() -> dict[str, str]:
 
 
 @api.post("/auth/login", response_model=TokenResponse)
-def login(request: LoginRequest) -> TokenResponse:
+def login(request: LoginRequest, response: Response) -> TokenResponse:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     secret = signing_secret()
     invalid_credentials = False
     token = ""
@@ -458,6 +492,229 @@ def read_ingestion_job(
         safe_error_code=job["safe_error_code"],
         line_errors=line_errors,
     )
+
+
+def parse_optional_cursor(cursor: str | None) -> tuple[datetime, UUID] | None:
+    if cursor is None:
+        return None
+    try:
+        return decode_cursor(cursor)
+    except CursorError:
+        raise HTTPException(status_code=400, detail="invalid_cursor") from None
+
+
+def validate_search_window(start: datetime | None, end: datetime | None) -> None:
+    for value in (start, end):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise HTTPException(status_code=400, detail="timezone_required")
+    if start is not None and end is not None and start >= end:
+        raise HTTPException(status_code=400, detail="invalid_time_window")
+
+
+@api.get("/logs", response_model=LogSearchResponse)
+def search_security_logs(
+    user: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+    start: datetime | None = None,
+    end: datetime | None = None,
+    asset_id: str | None = Query(default=None, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+    event_type: str | None = Query(default=None, max_length=100),
+    q: str | None = Query(default=None, max_length=128),
+    severity: str | None = Query(default=None, pattern=r"^(low|medium|high|critical)$"),
+    cursor: str | None = Query(default=None, max_length=256),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> LogSearchResponse:
+    del user
+    validate_search_window(start, end)
+    decoded_cursor = parse_optional_cursor(cursor)
+    with database_connection() as connection:
+        rows = search_logs(
+            connection,
+            start=start,
+            end=end,
+            asset_id=asset_id,
+            event_type=event_type,
+            query=q,
+            severity=severity,
+            cursor=decoded_cursor,
+            limit=limit,
+        )
+    has_more = len(rows) > limit
+    items = [LogSearchItem(**row) for row in rows[:limit]]
+    next_cursor = (
+        encode_cursor(items[-1].occurred_at, items[-1].log_id)
+        if has_more and items
+        else None
+    )
+    return LogSearchResponse(items=items, next_cursor=next_cursor)
+
+
+@api.get("/alerts", response_model=AlertSearchResponse)
+def search_security_alerts(
+    _: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+    start: datetime | None = None,
+    end: datetime | None = None,
+    severity: str | None = Query(default=None, pattern=r"^(low|medium|high|critical)$"),
+    category: str | None = Query(default=None, max_length=80),
+    asset_id: str | None = Query(default=None, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+    cursor: str | None = Query(default=None, max_length=256),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> AlertSearchResponse:
+    validate_search_window(start, end)
+    decoded_cursor = parse_optional_cursor(cursor)
+    with database_connection() as connection:
+        rows = search_alerts(
+            connection,
+            start=start,
+            end=end,
+            severity=severity,
+            category=category,
+            asset_id=asset_id,
+            cursor=decoded_cursor,
+            limit=limit,
+        )
+    has_more = len(rows) > limit
+    items = [AlertItem(**row) for row in rows[:limit]]
+    next_cursor = (
+        encode_cursor(items[-1].detected_at, items[-1].id)
+        if has_more and items
+        else None
+    )
+    return AlertSearchResponse(items=items, next_cursor=next_cursor)
+
+
+@api.get("/alerts/stream")
+async def stream_security_alerts(
+    request: Request,
+    _: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID", max_length=256),
+) -> StreamingResponse:
+    cursor_value = parse_optional_cursor(last_event_id)
+
+    async def events():
+        nonlocal cursor_value
+        last_keepalive = time.monotonic()
+        while not await request.is_disconnected():
+            rows = await asyncio.to_thread(
+                alert_stream_batch, database_connection, cursor_value=cursor_value
+            )
+            for row in rows:
+                cursor_value = (row["detected_at"], row["id"])
+                event_id = encode_cursor(*cursor_value)
+                data = json.dumps(jsonable_encoder(row), separators=(",", ":"))
+                yield f"id: {event_id}\nevent: alert\ndata: {data}\n\n"
+            now = time.monotonic()
+            if not rows and now - last_keepalive >= 15:
+                yield ": keep-alive\n\n"
+                last_keepalive = now
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@api.get("/topology", response_model=TopologyResponse)
+def read_topology(
+    _: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+) -> TopologyResponse:
+    with database_connection() as connection:
+        nodes, edges = get_topology(connection)
+    return TopologyResponse(nodes=nodes, edges=edges)
+
+
+@api.post("/topology/path", response_model=PathResponse)
+def calculate_topology_path(
+    request: PathRequest,
+    _: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+) -> PathResponse:
+    with database_connection() as connection:
+        result = analyze_path(connection, request.source_id, request.destination_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Topology node not found")
+    return PathResponse(**result)
+
+
+@api.post("/topology/containment", response_model=ContainmentResponse)
+def simulate_topology_containment(
+    request: ContainmentRequest,
+    analyst: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+) -> ContainmentResponse:
+    with database_connection() as connection:
+        edge = set_edge_containment(
+            connection,
+            source_id=request.source_id,
+            destination_id=request.destination_id,
+            blocked=request.blocked,
+            actor_id=analyst.id,
+        )
+    if edge is None:
+        raise HTTPException(status_code=404, detail="Topology edge not found")
+    return ContainmentResponse(
+        source_id=edge["source_id"],
+        destination_id=edge["destination_id"],
+        is_blocked=edge["is_blocked"],
+        updated_at=edge["updated_at"],
+    )
+
+
+@api.post("/analytics/benchmarks", response_model=BenchmarkResponse, status_code=201)
+def create_analytics_benchmark(
+    request: BenchmarkRequest,
+    analyst: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+) -> BenchmarkResponse:
+    with database_connection() as connection:
+        result = run_benchmark(
+            connection,
+            actor_id=analyst.id,
+            dataset_size=request.dataset_size,
+            seed=request.seed,
+            sample_fraction=request.sample_fraction,
+        )
+    return BenchmarkResponse(
+        run_id=result["id"],
+        created_at=result["created_at"],
+        dataset_size=result["dataset_size"],
+        seed=result["seed"],
+        sample_fraction=result["sample_fraction"],
+        result=result["result"],
+    )
+
+
+@api.get("/analytics/benchmarks", response_model=BenchmarkHistoryResponse)
+def list_analytics_benchmarks(
+    _: Annotated[UserResponse, Depends(require_roles("analyst", "admin"))],
+    cursor: str | None = Query(default=None, max_length=256),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> BenchmarkHistoryResponse:
+    decoded_cursor = parse_optional_cursor(cursor)
+    with database_connection() as connection:
+        rows = get_benchmark_history(
+            connection, cursor_value=decoded_cursor, limit=limit
+        )
+    has_more = len(rows) > limit
+    items = [
+        BenchmarkResponse(
+            run_id=row["id"],
+            created_at=row["created_at"],
+            dataset_size=row["dataset_size"],
+            seed=row["seed"],
+            sample_fraction=row["sample_fraction"],
+            result=row["result"],
+        )
+        for row in rows[:limit]
+    ]
+    next_cursor = (
+        encode_cursor(items[-1].created_at, items[-1].run_id)
+        if has_more and items
+        else None
+    )
+    return BenchmarkHistoryResponse(items=items, next_cursor=next_cursor)
 
 
 app.include_router(api)
