@@ -62,6 +62,11 @@ services:
   frontend:
     build:
       context: ./frontend
+    environment:
+      PORT: "80"
+      BACKEND_HOSTPORT: backend:8000
+      CLIENT_IP_HEADER: x_slp_client_ip
+      NGINX_ENVSUBST_FILTER: "^(PORT|BACKEND_HOSTPORT|CLIENT_IP_HEADER)$"
     depends_on:
       backend:
         condition: service_healthy
@@ -70,7 +75,7 @@ services:
     expose:
       - "80"
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:$${PORT}/health"]
       interval: 10s
       timeout: 5s
       retries: 6

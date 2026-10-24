@@ -82,6 +82,40 @@ docker compose -f compose.yaml -f compose.public.yaml --profile public config -q
 docker compose -f compose.yaml -f compose.public.yaml --profile public up --build -d
 ```
 
+## Render deployment
+
+The repository includes a Render Blueprint at `render.yaml`. It deploys the
+frontend publicly, keeps the API private, and restricts the managed PostgreSQL
+database to Render's private network. The frontend service uses the Free plan;
+the private API uses Render's paid `0.5c-512mb` plan; the database currently
+uses the Free plan for a short-lived preview. Render Free Postgres is limited
+to 1 GB, has no backups, and expires after 30 days. For ongoing use, change the
+database to a paid plan in the Blueprint before deployment and check the
+current estimate shown by Render. Free web services can sleep after inactivity.
+
+To deploy:
+
+1. Push this repository to GitHub and select **New → Blueprint** in Render.
+2. Connect `freejo2003/SecureLogPath` and select `render.yaml`.
+3. Set `BOOTSTRAP_ADMIN_PASSWORD` when Render prompts for the Blueprint secret.
+   Use a unique password of at least 12 characters.
+4. Before creating the services, change `securelogpath-db` to a paid database
+   plan if this deployment must keep data past the 30-day preview period. Review
+   Render's displayed monthly estimate; no paid resources should be created
+   until you approve that amount.
+5. Create the Blueprint resources, then add the **private** RSA key file as a
+   secret file named `ingestion_private_key.pem` on `securelogpath-api`. Generate
+   a fresh key locally using `python -m app.keygen`; never commit or paste the
+   private key into GitHub or this Blueprint.
+6. Redeploy the API after adding the secret file. Check `/health/ready`, open
+   `/docs`, sign in as Admin, and run the encrypted demo-forwarder workflow.
+
+Render Postgres runs standard PostgreSQL for this deployment. The database
+migration uses TimescaleDB hypertables only when the extension is installed;
+otherwise it creates the same indexed log table without hypertable partitioning.
+The Blueprint disables auto-deploy so a Git push cannot silently trigger a
+production rollout. Render-managed TLS serves the public frontend.
+
 To stop the services while preserving database data, run `docker compose down`.
 To delete the database volume as well, run `docker compose down --volumes`.
 

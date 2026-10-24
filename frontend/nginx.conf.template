@@ -1,12 +1,12 @@
-map $http_x_slp_client_ip $auth_client_address {
+map $http_${CLIENT_IP_HEADER} $auth_client_address {
     ""      $binary_remote_addr;
-    default $http_x_slp_client_ip;
+    default $http_${CLIENT_IP_HEADER};
 }
 
 limit_req_zone $auth_client_address zone=auth_login:10m rate=10r/m;
 
 server {
-    listen 80;
+    listen ${PORT};
     server_name _;
     root /usr/share/nginx/html;
     index index.html;
@@ -18,19 +18,19 @@ server {
     }
 
     location = /docs {
-        proxy_pass http://backend:8000/docs;
+        proxy_pass http://${BACKEND_HOSTPORT}/docs;
         proxy_set_header Host $host;
     }
 
     location = /openapi.json {
-        proxy_pass http://backend:8000/openapi.json;
+        proxy_pass http://${BACKEND_HOSTPORT}/openapi.json;
         proxy_set_header Host $host;
     }
 
     location = /api/v1/auth/login {
         limit_req zone=auth_login burst=5 nodelay;
         limit_req_status 429;
-        proxy_pass http://backend:8000;
+        proxy_pass http://${BACKEND_HOSTPORT};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -41,7 +41,7 @@ server {
     location /api/ {
         # The API hard-limits uploads to 8 MiB; leave room for multipart framing.
         client_max_body_size 9m;
-        proxy_pass http://backend:8000;
+        proxy_pass http://${BACKEND_HOSTPORT};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

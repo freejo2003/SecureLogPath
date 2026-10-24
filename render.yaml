@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: securelogpath-frontend
+    runtime: docker
+    region: singapore
+    plan: free
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    healthCheckPath: /health
+    autoDeployTrigger: off
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: NGINX_ENVSUBST_FILTER
+        value: "^(PORT|BACKEND_HOSTPORT|CLIENT_IP_HEADER)$"
+      - key: CLIENT_IP_HEADER
+        value: cf_connecting_ip
+      - key: BACKEND_HOSTPORT
+        fromService:
+          name: securelogpath-api
+          type: pserv
+          property: hostport
+
+  - type: pserv
+    name: securelogpath-api
+    runtime: docker
+    region: singapore
+    plan: 0.5c-512mb
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    autoDeployTrigger: off
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: securelogpath-db
+          property: connectionString
+      - key: JWT_SIGNING_SECRET
+        generateValue: true
+      - key: BOOTSTRAP_ADMIN_USERNAME
+        value: admin
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: INGESTION_KEY_ID
+        value: siem-key-2026-01
+      - key: INGESTION_PRIVATE_KEY_PATH
+        value: /etc/secrets/ingestion_private_key.pem
+      - key: MAX_UPLOAD_BYTES
+        value: "2097152"
+      - key: MAX_UPLOAD_LINES
+        value: "5000"
+      - key: MAX_CONCURRENT_INGESTIONS
+        value: "2"
+
+databases:
+  - name: securelogpath-db
+    region: singapore
+    plan: free
+    databaseName: securelogpath
+    user: securelogpath
+    ipAllowList: []

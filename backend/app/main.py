@@ -90,6 +90,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def database_connection() -> psycopg.Connection:
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if database_url:
+        return psycopg.connect(database_url, connect_timeout=3)
+
     return psycopg.connect(
         host=os.environ["DATABASE_HOST"],
         port=int(os.environ.get("DATABASE_PORT", "5432")),

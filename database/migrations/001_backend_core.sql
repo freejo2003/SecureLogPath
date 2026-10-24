@@ -41,7 +41,17 @@ CREATE TABLE IF NOT EXISTS security_logs (
     stored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (occurred_at, log_id)
 );
-SELECT create_hypertable('security_logs', by_range('occurred_at'), if_not_exists => TRUE);
+-- TimescaleDB is optional. Render Postgres supports the extension but does not
+-- expose its community features; ordinary PostgreSQL tables remain supported.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable(
+            'security_logs', by_range('occurred_at'), if_not_exists => TRUE
+        );
+    END IF;
+END;
+$$;
 CREATE INDEX IF NOT EXISTS security_logs_time_idx ON security_logs (occurred_at DESC);
 CREATE INDEX IF NOT EXISTS security_logs_source_time_idx ON security_logs (source_asset_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS security_logs_destination_time_idx ON security_logs (destination_asset_id, occurred_at DESC);
